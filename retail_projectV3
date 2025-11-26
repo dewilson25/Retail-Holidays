@@ -1,0 +1,453 @@
+-- Project: Retail Sales + Holiday Analysis
+-- Goal: Boost weak holiday sales and sustain strong ones
+
+-- ===========================================
+-- 1. Data Cleaning & Inspection
+
+-- Inspect tables and check columns
+EXEC sp_columns retail_holiday;
+EXEC sp_columns #retail_sales_aligned;
+
+-- Check raw data samples
+SELECT TOP 100 * FROM retail_holiday;
+SELECT TOP 100 * FROM #retail_sales_aligned;
+
+
+-- Check DISTINCT values
+SELECT DISTINCT * FROM retail_holiday;
+SELECT DISTINCT * FROM #retail_sales_aligned;
+SELECT DISTINCT Product_Category FROM #retail_sales_aligned;
+SELECT DISTINCT Product_Category FROM retail_holiday;
+
+-- ===========================================
+-- 2. Correct Data Types & Standardize Values
+
+-- Backup Table
+SELECT * INTO retail_holiday_backup FROM retail_holiday;
+
+-- Correct numeric and bit columns
+ALTER TABLE retail_holiday ALTER COLUMN Petrol_price INT;
+UPDATE retail_holiday
+SET Petrol_price = CASE WHEN TRY_CAST(Petrol_price AS INT) IS NOT NULL THEN CAST(Petrol_price AS INT) ELSE NULL END;
+
+ALTER TABLE retail_holiday ALTER COLUMN Product_id INT;
+UPDATE retail_holiday
+SET Product_id = CASE WHEN TRY_CAST(Product_id AS INT) IS NOT NULL THEN CAST(Product_id AS INT) ELSE NULL END;
+
+ALTER TABLE retail_holiday ALTER COLUMN [Open] BIT;
+ALTER TABLE retail_holiday ALTER COLUMN StateHoliday BIT;
+ALTER TABLE retail_holiday ALTER COLUMN Promo BIT;
+ALTER TABLE retail_holiday ALTER COLUMN SchoolHoliday BIT;
+
+
+-- Fix the date mismatch (shift retail_sales into 2016)
+SELECT DATEDIFF(day, '2023-01-01', '2016-01-01') AS day_shift;
+
+DECLARE @day_shift INT;
+SET @day_shift = DATEDIFF(day, '2023-01-01', '2016-01-01');
+
+SELECT
+    *, 
+    DATEADD(day, @day_shift, Date) AS aligned_date
+INTO #retail_sales_aligned
+FROM retail_sales;
+
+
+SELECT MIN(aligned_date) AS min_aligned, MAX(aligned_date) AS max_aligned
+FROM #retail_sales_aligned;
+
+SELECT TOP 20
+    Date AS orig_date,
+    DATENAME(weekday, Date) AS orig_weekday,
+    aligned_date,
+    DATENAME(weekday, aligned_date) AS aligned_weekday
+FROM #retail_sales_aligned;
+
+SELECT
+    COUNT(*) AS total_rows,
+    SUM(CASE WHEN Date IS NULL THEN 1 ELSE 0 END) AS orig_null_dates,
+    SUM(CASE WHEN aligned_date IS NULL THEN 1 ELSE 0 END) AS aligned_null_dates
+FROM #retail_sales_aligned;
+
+-- Standardize SchoolHoliday
+UPDATE retail_holiday
+SET SchoolHoliday = CASE WHEN SchoolHoliday = 'SchoolHoliday' THEN NULL ELSE SchoolHoliday END;
+
+-- Standardize date
+ALTER TABLE retail_holiday ALTER COLUMN Date DATE;
+UPDATE retail_holiday
+SET Date = CASE WHEN TRY_CAST(Date AS DATE) IS NOT NULL THEN CAST(Date AS DATE) ELSE NULL END;
+
+-- ===========================================
+-- 3. Show True/False
+
+SELECT
+    CASE [Open] 
+        WHEN 1 THEN 'TRUE' 
+        WHEN 0 THEN 'FALSE' 
+        ELSE NULL 
+    END AS Open_visible,
+
+    CASE StateHoliday 
+        WHEN 1 THEN 'TRUE' 
+        WHEN 0 THEN 'FALSE' 
+        ELSE NULL 
+    END AS StateHoliday_visible,
+
+    CASE Promo 
+        WHEN 1 THEN 'TRUE' 
+        WHEN 0 THEN 'FALSE' 
+        ELSE NULL 
+    END AS Promo_visible,
+
+    CASE SchoolHoliday 
+        WHEN 1 THEN 'TRUE' 
+        WHEN 0 THEN 'FALSE' 
+        ELSE NULL 
+    END AS SchoolHoliday_visible
+FROM retail_holiday;
+
+-- ===========================================
+-- 4. Master Calendar & Holiday Windows
+
+-- Create holiday_calendar
+CREATE TABLE holiday_calendar (
+    holiday_date DATE PRIMARY KEY,
+    holiday_name VARCHAR(50)
+);
+
+INSERT INTO holiday_calendar (holiday_date, holiday_name)
+VALUES
+('2016-01-01', 'New Year''s Day'),
+('2016-01-18', 'Martin Luther King Jr. Day'),
+('2016-02-20', 'Presidents'' Day'),
+('2016-05-30', 'Memorial Day'),
+('2016-07-04', 'Independence Day'),
+('2016-09-05', 'Labor Day'),
+('2016-11-11', 'Veterans Day'),
+('2016-11-24', 'Thanksgiving'),
+('2016-12-25', 'Christmas');
+
+-- Holiday_window
+
+-- Master date list (all_dates)
+ WITH all_dates AS (
+    SELECT 
+        aligned_date AS unified_date 
+    FROM #retail_sales_aligned
+    UNION
+    SELECT 
+        Date 
+    FROM retail_holiday
+    UNION
+    SELECT 
+        holiday_date 
+    FROM holiday_calendar
+),
+
+-- Master
+master AS (
+    SELECT
+        d.unified_date,
+        hol.Petrol_price,
+        hol.Order_Demand,
+        hol.Product_Category,
+        hol.Product_id,
+        hol.Promo,
+        al.Total_Amount,
+        al.Customer_ID,
+        al.Gender,
+        al.Age,
+        cal.holiday_date AS official_holiday,
+        cal.holiday_name
+FROM all_dates d
+    LEFT JOIN retail_holiday hol 
+        ON hol.Date = d.unified_date
+    LEFT JOIN #retail_sales_aligned al
+        ON al.aligned_date = d.unified_date
+    LEFT JOIN holiday_calendar cal
+        ON d.unified_date BETWEEN 
+        DATEADD(day, -7, cal.holiday_date)
+        AND DATEADD(day, 7, cal.holiday_date)
+    )
+-- Create temp table with master cte (# = temp)
+SELECT *
+INTO #master_temp
+FROM master;
+
+
+-- Add synthetic logic to enrich data
+-- =========================================== 
+-- Add new column for holiday multiplier
+ALTER TABLE #master_temp
+ADD holiday_multiplier FLOAT;
+
+UPDATE #master_temp
+SET holiday_multiplier =
+    CASE 
+        WHEN holiday_name = 'Christmas' THEN 1.45
+        WHEN holiday_name = 'Thanksgiving' THEN 1.30
+        WHEN holiday_name = 'Independence Day' THEN 1.18
+        WHEN holiday_name IN (
+            'New Year''s Day',
+            'Martin Luther King Jr. Day',
+            'Presidents'' Day',
+            'Memorial Day',
+            'Labor Day',
+            'Veterans Day'
+        )THEN 1.10 
+         ELSE 1.00 
+    END;
+
+-- Add new column for enriched sales
+ALTER TABLE #master_temp
+ADD uplifted_sales FLOAT;
+
+UPDATE #master_temp
+SET uplifted_sales = Total_Amount * holiday_multiplier
+WHERE Total_Amount IS NOT NULL;
+
+-- Add new column for petrol sensitivity
+ALTER TABLE #master_temp
+ADD petrol_factor FLOAT;
+
+UPDATE #master_temp
+SET petrol_factor =
+    CASE
+        WHEN Petrol_price IS NULL THEN 1.00
+        WHEN Petrol_price < 70 THEN 1.10 
+        WHEN Petrol_price BETWEEN 70 AND 100 THEN 1.00
+        WHEN Petrol_price > 100 THEN 0.88
+        ELSE 1.00
+    END;
+
+-- Add new column for adjusted order demand
+ALTER TABLE #master_temp
+ADD adjusted_order_demand FLOAT;
+
+UPDATE #master_temp
+SET adjusted_order_demand =
+    CASE
+        WHEN Order_Demand IS NOT NULL 
+            THEN Order_Demand * petrol_factor
+        ELSE NULL
+    END;
+
+-- ===========================================
+-- 5. Basic Descriptive Statistics
+
+-- Sales metrics
+SELECT 
+    MIN(Total_Amount) AS min_total, 
+    MAX(Total_Amount) AS max_total, 
+    AVG(Total_Amount) AS avg_total
+FROM #retail_sales_aligned;
+
+-- Price per unit metrics
+SELECT 
+    MIN(Price_per_Unit) AS min_ppu, 
+    MAX(Price_per_Unit) AS max_ppu, 
+    AVG(Price_per_Unit) AS avg_ppu 
+FROM #retail_sales_aligned;
+
+-- Age metrics
+SELECT 
+    MIN(age) AS min_age, 
+    MAX(age) AS max_age, 
+    AVG(age) AS avg_age 
+FROM #retail_sales_aligned;
+
+-- Order demand
+SELECT 
+    MIN(Order_Demand) AS min_Order_Demand, 
+    MAX(Order_Demand) AS max_Order_Demand, 
+    AVG(Order_Demand) AS avg_Order_Demand 
+FROM retail_holiday;
+
+-- Petrol price
+SELECT 
+    MIN(Petrol_price) AS min_Petrol_price,
+     MAX(Petrol_price) AS max_Petrol_price, 
+     AVG(Petrol_price) AS avg_Petrol_price 
+FROM retail_holiday;
+
+-- Date ranges
+SELECT 
+    MIN(date), 
+    MAX(date) 
+FROM retail_holiday;
+
+-- Age groups
+SELECT 
+    age_group, 
+    COUNT(*) AS age_count
+FROM (
+    SELECT CASE
+        WHEN Age <= 25 THEN 'Young Adult'
+        WHEN Age BETWEEN 26 AND 39 THEN 'Mid Adult'
+        WHEN Age BETWEEN 40 AND 55 THEN 'Grown Adult'
+        WHEN Age BETWEEN 56 AND 64 THEN 'Senior'
+        ELSE 'Unknown'
+    END AS age_group
+    FROM #retail_sales_aligned
+) AS age_range
+GROUP BY age_group
+ORDER BY age_count DESC;
+
+-- Age + gender
+SELECT age_group, gender, COUNT(*) AS customer_count
+FROM (
+    SELECT CASE
+        WHEN Age <= 25 THEN 'Young Adult'
+        WHEN Age BETWEEN 26 AND 39 THEN 'Mid Adult'
+        WHEN Age BETWEEN 40 AND 55 THEN 'Grown Adult'
+        WHEN Age BETWEEN 56 AND 64 THEN 'Senior'
+        ELSE 'Unknown'
+    END AS age_group,
+    gender
+    FROM #retail_sales_aligned
+) AS gendered_age
+GROUP BY age_group, gender
+ORDER BY age_group, customer_count DESC;
+
+-- ===========================================
+-- 6. Sales Trend Analysis
+
+-- Daily / weekly sales patterns
+WITH daily_sales AS(
+    SELECT
+        unified_date,
+        DATENAME(weekday, unified_date) AS weekday_name,
+        DATEPART(week, unified_date) AS week_number,
+        SUM(Total_Amount) AS daily_total  
+    FROM #master_temp
+    GROUP BY unified_date
+)
+SELECT
+    unified_date,
+    weekday_name,
+    week_number,
+    daily_total,
+    SUM(daily_total) OVER (PARTITION BY week_number) AS weekly_total,
+    SUM(daily_total) OVER (ORDER BY unified_date
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS rolling_7day_total,
+    AVG(daily_total) OVER (ORDER BY unified_date
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+    ) AS moving_avg_7
+FROM daily_sales
+ORDER BY unified_date;
+
+-- Rolling averages /moving sums |shows momemntum trends
+SELECT
+    unified_date,
+    ROUND(AVG(Total_Amount) OVER (
+        ORDER BY unified_date 
+        ROWS BETWEEN 6 PRECEDING AND CURRENT ROW),2) AS moving_avg_7,
+  SUM(Total_Amount) OVER(
+            ORDER BY unified_date
+            ROWS BETWEEN 6 PRECEDING AND CURRENT ROW
+        )AS rolling_7day_sales
+FROM #master_temp
+ORDER BY unified_date;
+
+-- ===========================================
+-- 7. Product-Level Exploration
+
+-- Best & Worst Selling Products
+WITH product_sales AS (
+    SELECT
+        ISNULL(Product_Category, 'Unknown') AS Product_Category,
+        Product_id,
+        SUM(ISNULL(Total_Amount,0)) AS total_sales
+    FROM #master_temp
+    GROUP BY Product_Category, Product_id
+)
+    SELECT
+        total_sales,
+        Product_Category,
+        Product_id,
+        ROW_NUMBER() OVER (PARTITION BY Product_Category
+            ORDER BY total_sales DESC, Product_id ASC) AS top_selling,
+        ROW_NUMBER() OVER (PARTITION BY Product_Category
+            ORDER BY total_sales ASC, Product_id ASC) AS bottom_selling
+    FROM product_sales
+    ORDER BY Product_Category, top_selling, bottom_selling;
+
+-- Product preference by age + gender
+-- Create temp table with age-gender
+WITH age_gender_group AS (
+SELECT
+    Product_Category, 
+    age_group, 
+    gender, 
+    Total_Amount,
+    Product_id,
+    SUM(total_Amount) AS total_sales,
+    COUNT(*) AS order_count
+FROM (
+    SELECT 
+        gender,
+        Total_Amount,
+        Product_Category, 
+        Product_id,
+        CASE
+            WHEN Age <= 25 THEN 'Young Adult'
+            WHEN Age BETWEEN 26 AND 39 THEN 'Mid Adult'
+            WHEN Age BETWEEN 40 AND 55 THEN 'Grown Adult'
+            WHEN Age BETWEEN 56 AND 64 THEN 'Senior'
+            ELSE 'Unknown'
+        END AS age_group
+    FROM #master_temp
+) AS age_gender_products
+GROUP BY Product_Category, age_group, gender, Product_id, Total_Amount
+)
+SELECT *
+INTO #age_gender_temp
+FROM age_gender_group
+ORDER BY Product_Category, age_group, gender, Product_id;
+
+
+-- Promotion effectiveness
+-- Sales are higher with no promotions, probably cut back on promotions
+SELECT
+    Promo,
+    SUM(Total_Amount) AS total_sales,
+    AVG(Total_Amount) AS avg_sales,
+    COUNT(*) AS order_count
+FROM #master_temp
+GROUP BY Promo
+ORDER BY order_count DESC;
+-- ===========================================
+-- 8. Customer Segmentation
+
+-- Age + gender clusters
+SELECT 
+    age_group,
+    ROUND(SUM(Total_Amount),2) AS total_sales --age group only
+FROM #age_gender_temp
+GROUP BY age_group
+ORDER BY total_sales DESC;
+
+SELECT age_group,
+       Product_Category,
+       SUM(order_count) AS orders -- age group buys which product
+FROM #age_gender_temp
+GROUP BY age_group, Product_Category
+ORDER BY orders DESC;
+
+-- ===========================================
+-- 9. Holiday Insights
+
+-- Rank holidays by performance
+SELECT
+    holiday_name,
+    COUNT(*) AS row_count,
+    SUM(Total_Amount) AS total_sales,
+    ROUND(AVG(Total_Amount),2) AS avg_sale_per_row,
+    DENSE_RANK() OVER (ORDER BY AVG(Total_Amount) DESC) AS rank_top,
+    DENSE_RANK() OVER (ORDER BY AVG(Total_Amount) ASC) AS rank_bottom
+FROM #master_temp
+WHERE holiday_name IS NOT NULL
+GROUP BY holiday_name
+ORDER BY rank_top;
