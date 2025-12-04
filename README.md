@@ -100,8 +100,9 @@ ORDER BY total_sales DESC;
 
 Takeaway: Adjust stock allocation during peak holidays to maximize revenue.
 
-5. Recommendations
-Pre/Post-Christmas promotions: Capture lost sales due to store closures.
-Refine promotions: Target high-value products and demographics to increase average order value.
-Targeted inventory & marketing: Use customer and product insights to prioritize high-potential items.
-Monitor weaker holidays: Track total sales to evaluate the success of interventions.
+## 5. Recommendations
+
+- Pre/Post-Christmas promotions: Capture lost sales due to store closures.
+- Refine promotions: Target high-value products and demographics to increase average order value.
+- Targeted inventory & marketing: Use customer and product insights to prioritize high-potential items.
+- Monitor weaker holidays: Track total sales to evaluate the success of interventions.
