@@ -99,7 +99,7 @@ SELECT * FROM product_sales
 ORDER BY total_sales DESC;
 
 Takeaway: Adjust stock allocation during peak holidays to maximize revenue.
-
+```
 ## 5. Recommendations
 
 - Pre/Post-Christmas promotions: Capture lost sales due to store closures.
